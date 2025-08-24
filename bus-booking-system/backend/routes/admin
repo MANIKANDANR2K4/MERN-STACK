@@ -1,0 +1,731 @@
+const express = require('express');
+const { body, validationResult } = require('express-validator');
+const User = require('../models/User');
+const Bus = require('../models/Bus');
+const Route = require('../models/Route');
+const Booking = require('../models/Booking');
+const Payment = require('../models/Payment');
+const Trip = require('../models/Trip');
+const { protect, admin } = require('../middleware/auth');
+
+const router = express.Router();
+
+// All routes require admin authentication
+router.use(protect, admin);
+
+// @desc    Get admin dashboard overview
+// @route   GET /api/admin/dashboard
+// @access  Private/Admin
+router.get('/dashboard', async (req, res) => {
+  try {
+    // Get counts
+    const totalUsers = await User.countDocuments();
+    const totalBuses = await Bus.countDocuments();
+    const totalRoutes = await Bus.countDocuments();
+    const totalBookings = await Booking.countDocuments();
+    const totalPayments = await Payment.countDocuments();
+    const totalTrips = await Trip.countDocuments();
+
+    // Get active counts
+    const activeUsers = await User.countDocuments({ isActive: true });
+    const activeBuses = await Bus.countDocuments({ isActive: true, status: 'active' });
+    const activeRoutes = await Route.countDocuments({ isActive: true, status: 'active' });
+    const activeTrips = await Trip.countDocuments({ isActive: true });
+
+    // Get recent activity
+    const recentBookings = await Booking.find({ isActive: true })
+      .populate('user', 'firstName lastName')
+      .populate('route', 'routeNumber routeName')
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    const recentPayments = await Payment.find({ isActive: true })
+      .populate('user', 'firstName lastName')
+      .populate('booking', 'bookingNumber')
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    // Get revenue stats
+    const revenueStats = await Payment.aggregate([
+      { $match: { status: 'completed' } },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$amount.totalAmount' },
+          avgPayment: { $avg: '$amount.totalAmount' }
+        }
+      }
+    ]);
+
+    // Get monthly trends
+    const monthlyBookings = await Booking.aggregate([
+      {
+        $group: {
+          _id: {
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' }
+          },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+      { $limit: 6 }
+    ]);
+
+    const monthlyRevenue = await Payment.aggregate([
+      { $match: { status: 'completed' } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' }
+          },
+          revenue: { $sum: '$amount.totalAmount' }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+      { $limit: 6 }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        counts: {
+          total: { users: totalUsers, buses: totalBuses, routes: totalRoutes, bookings: totalBookings, payments: totalPayments, trips: totalTrips },
+          active: { users: activeUsers, buses: activeBuses, routes: activeRoutes, trips: activeTrips }
+        },
+        recentActivity: {
+          bookings: recentBookings,
+          payments: recentPayments
+        },
+        revenue: revenueStats[0] || {},
+        trends: {
+          monthlyBookings,
+          monthlyRevenue
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Get admin dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching dashboard data'
+    });
+  }
+});
+
+// @desc    Get system statistics
+// @route   GET /api/admin/stats/system
+// @access  Private/Admin
+router.get('/stats/system', async (req, res) => {
+  try {
+    // User statistics
+    const userStats = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalUsers: { $sum: 1 },
+          verifiedUsers: { $sum: { $cond: ['$isVerified', 1, 0] } },
+          activeUsers: { $sum: { $cond: ['$isActive', 1, 0] } }
+        }
+      }
+    ]);
+
+    const roleDistribution = await User.aggregate([
+      { $group: { _id: '$role', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // Bus statistics
+    const busStats = await Bus.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBuses: { $sum: 1 },
+          activeBuses: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+          maintenanceBuses: { $sum: { $cond: [{ $eq: ['$status', 'maintenance'] }, 1, 0] } }
+        }
+      }
+    ]);
+
+    const busTypeDistribution = await Bus.aggregate([
+      { $group: { _id: '$busType', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // Route statistics
+    const routeStats = await Route.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRoutes: { $sum: 1 },
+          activeRoutes: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+          avgDistance: { $avg: '$distance.total' },
+          avgDuration: { $avg: '$duration.estimated' }
+        }
+      }
+    ]);
+
+    // Booking statistics
+    const bookingStats = await Booking.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBookings: { $sum: 1 },
+          confirmedBookings: { $sum: { $cond: [{ $eq: ['$status', 'confirmed'] }, 1, 0] } },
+          cancelledBookings: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+          completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } }
+        }
+      }
+    ]);
+
+    // Payment statistics
+    const paymentStats = await Payment.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalPayments: { $sum: 1 },
+          completedPayments: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          failedPayments: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, '$amount.totalAmount', 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        users: {
+          ...userStats[0],
+          roleDistribution
+        },
+        buses: {
+          ...busStats[0],
+          typeDistribution: busTypeDistribution
+        },
+        routes: routeStats[0] || {},
+        bookings: bookingStats[0] || {},
+        payments: paymentStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get system stats error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching system statistics'
+    });
+  }
+});
+
+// @desc    Get real-time system status
+// @route   GET /api/admin/status/realtime
+// @access  Private/Admin
+router.get('/status/realtime', async (req, res) => {
+  try {
+    // Get current active trips
+    const activeTrips = await Trip.find({ 
+      isActive: true, 
+      status: { $in: ['boarding', 'departed', 'in-transit'] } 
+    })
+    .populate('route', 'routeNumber routeName origin destination')
+    .populate('bus', 'busNumber busName')
+    .populate('driver', 'firstName lastName');
+
+    // Get recent system alerts
+    const recentAlerts = [];
+
+    // Check for buses in maintenance
+    const maintenanceBuses = await Bus.countDocuments({ status: 'maintenance' });
+    if (maintenanceBuses > 0) {
+      recentAlerts.push({
+        type: 'warning',
+        message: `${maintenanceBuses} buses are currently in maintenance`,
+        timestamp: new Date()
+      });
+    }
+
+    // Check for failed payments
+    const failedPayments = await Payment.countDocuments({ status: 'failed' });
+    if (failedPayments > 0) {
+      recentAlerts.push({
+        type: 'error',
+        message: `${failedPayments} payments have failed and need attention`,
+        timestamp: new Date()
+      });
+    }
+
+    // Check for delayed trips
+    const delayedTrips = await Trip.find({ 
+      isActive: true, 
+      'schedule.delay': { $gt: 0 } 
+    }).count();
+    
+    if (delayedTrips > 0) {
+      recentAlerts.push({
+        type: 'warning',
+        message: `${delayedTrips} trips are currently delayed`,
+        timestamp: new Date()
+      });
+    }
+
+    // Get system performance metrics
+    const systemMetrics = {
+      activeTrips: activeTrips.length,
+      maintenanceBuses,
+      failedPayments,
+      delayedTrips,
+      totalAlerts: recentAlerts.length
+    };
+
+    res.json({
+      success: true,
+      data: {
+        systemMetrics,
+        activeTrips,
+        recentAlerts
+      }
+    });
+
+  } catch (error) {
+    console.error('Get real-time status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching real-time status'
+    });
+  }
+});
+
+// @desc    Get user management overview
+// @route   GET /api/admin/users/overview
+// @access  Private/Admin
+router.get('/users/overview', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    
+    // Search by name or email
+    if (req.query.search) {
+      filter.$or = [
+        { firstName: { $regex: req.query.search, $options: 'i' } },
+        { lastName: { $regex: req.query.search, $options: 'i' } },
+        { email: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+
+    // Filter by role
+    if (req.query.role) {
+      filter.role = req.query.role;
+    }
+
+    // Filter by status
+    if (req.query.status) {
+      filter.isActive = req.query.status === 'active';
+    }
+
+    const users = await User.find(filter)
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await User.countDocuments(filter);
+
+    // Get user statistics
+    const userStats = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalUsers: { $sum: 1 },
+          verifiedUsers: { $sum: { $cond: ['$isVerified', 1, 0] } },
+          activeUsers: { $sum: { $cond: ['$isActive', 1, 0] } },
+          lockedUsers: { $sum: { $cond: ['$isLocked', 1, 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        users,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalUsers: total,
+          usersPerPage: limit
+        },
+        stats: userStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get users overview error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching users overview'
+    });
+  }
+});
+
+// @desc    Get bus management overview
+// @route   GET /api/admin/buses/overview
+// @access  Private/Admin
+router.get('/buses/overview', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    
+    // Search by bus number or name
+    if (req.query.search) {
+      filter.$or = [
+        { busNumber: { $regex: req.query.search, $options: 'i' } },
+        { busName: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+
+    // Filter by status
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Filter by bus type
+    if (req.query.busType) {
+      filter.busType = req.query.busType;
+    }
+
+    const buses = await Bus.find(filter)
+      .populate('driver', 'firstName lastName email phone')
+      .populate('conductor', 'firstName lastName email phone')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Bus.countDocuments(filter);
+
+    // Get bus statistics
+    const busStats = await Bus.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBuses: { $sum: 1 },
+          activeBuses: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+          maintenanceBuses: { $sum: { $cond: [{ $eq: ['$status', 'maintenance'] }, 1, 0] } },
+          outOfServiceBuses: { $sum: { $cond: [{ $eq: ['$status', 'out-of-service'] }, 1, 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        buses,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalBuses: total,
+          busesPerPage: limit
+        },
+        stats: busStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get buses overview error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching buses overview'
+    });
+  }
+});
+
+// @desc    Get route management overview
+// @route   GET /api/admin/routes/overview
+// @access  Private/Admin
+router.get('/routes/overview', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    
+    // Search by route number or name
+    if (req.query.search) {
+      filter.$or = [
+        { routeNumber: { $regex: req.query.search, $options: 'i' } },
+        { routeName: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+
+    // Filter by status
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Filter by origin or destination
+    if (req.query.city) {
+      filter.$or = [
+        { 'origin.city': { $regex: req.query.city, $options: 'i' } },
+        { 'destination.city': { $regex: req.query.city, $options: 'i' } }
+      ];
+    }
+
+    const routes = await Route.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Route.countDocuments(filter);
+
+    // Get route statistics
+    const routeStats = await Route.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRoutes: { $sum: 1 },
+          activeRoutes: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+          inactiveRoutes: { $sum: { $cond: [{ $eq: ['$status', 'inactive'] }, 1, 0] } },
+          discontinuedRoutes: { $sum: { $cond: [{ $eq: ['$status', 'discontinued'] }, 1, 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        routes,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalRoutes: total,
+          routesPerPage: limit
+        },
+        stats: routeStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get routes overview error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching routes overview'
+    });
+  }
+});
+
+// @desc    Get booking management overview
+// @route   GET /api/admin/bookings/overview
+// @access  Private/Admin
+router.get('/bookings/overview', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const filter = { isActive: true };
+    
+    // Filter by status
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Filter by date range
+    if (req.query.startDate && req.query.endDate) {
+      filter['journeyDetails.departureDate'] = {
+        $gte: new Date(req.query.startDate),
+        $lte: new Date(req.query.endDate)
+      };
+    }
+
+    // Search by booking number
+    if (req.query.search) {
+      filter.bookingNumber = { $regex: req.query.search, $options: 'i' };
+    }
+
+    const bookings = await Booking.find(filter)
+      .populate('user', 'firstName lastName email')
+      .populate('route', 'routeNumber routeName origin destination')
+      .populate('bus', 'busNumber busName')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Booking.countDocuments(filter);
+
+    // Get booking statistics
+    const bookingStats = await Booking.aggregate([
+      { $match: { isActive: true } },
+      {
+        $group: {
+          _id: null,
+          totalBookings: { $sum: 1 },
+          confirmedBookings: { $sum: { $cond: [{ $eq: ['$status', 'confirmed'] }, 1, 0] } },
+          cancelledBookings: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+          completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        bookings,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalBookings: total,
+          bookingsPerPage: limit
+        },
+        stats: bookingStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get bookings overview error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching bookings overview'
+    });
+  }
+});
+
+// @desc    Get payment management overview
+// @route   GET /api/admin/payments/overview
+// @access  Private/Admin
+router.get('/payments/overview', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const filter = { isActive: true };
+    
+    // Filter by status
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Filter by payment method
+    if (req.query.method) {
+      filter['paymentMethod.type'] = req.query.method;
+    }
+
+    // Filter by date range
+    if (req.query.startDate && req.query.endDate) {
+      filter.createdAt = {
+        $gte: new Date(req.query.startDate),
+        $lte: new Date(req.query.endDate)
+      };
+    }
+
+    const payments = await Payment.find(filter)
+      .populate('user', 'firstName lastName email')
+      .populate('booking', 'bookingNumber')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Payment.countDocuments(filter);
+
+    // Get payment statistics
+    const paymentStats = await Payment.aggregate([
+      { $match: { isActive: true } },
+      {
+        $group: {
+          _id: null,
+          totalPayments: { $sum: 1 },
+          completedPayments: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          failedPayments: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+          pendingPayments: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, '$amount.totalAmount', 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        payments,
+        pagination: {
+          currentPage: page,
+          totalPages: Math.ceil(total / limit),
+          totalPayments: total,
+          paymentsPerPage: limit
+        },
+        stats: paymentStats[0] || {}
+      }
+    });
+
+  } catch (error) {
+    console.error('Get payments overview error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching payments overview'
+    });
+  }
+});
+
+// @desc    Get system logs (placeholder for future implementation)
+// @route   GET /api/admin/logs
+// @access  Private/Admin
+router.get('/logs', async (req, res) => {
+  try {
+    // This would be implemented with a proper logging system
+    // For now, return a placeholder response
+    res.json({
+      success: true,
+      message: 'Log system not yet implemented',
+      data: []
+    });
+
+  } catch (error) {
+    console.error('Get logs error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching logs'
+    });
+  }
+});
+
+// @desc    Get system health check
+// @route   GET /api/admin/health
+// @access  Private/Admin
+router.get('/health', async (req, res) => {
+  try {
+    const healthStatus = {
+      database: 'healthy',
+      server: 'healthy',
+      timestamp: new Date(),
+      uptime: process.uptime()
+    };
+
+    // Check database connection
+    try {
+      await User.findOne().limit(1);
+      healthStatus.database = 'healthy';
+    } catch (error) {
+      healthStatus.database = 'unhealthy';
+    }
+
+    res.json({
+      success: true,
+      data: healthStatus
+    });
+
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during health check'
+    });
+  }
+});
+
+module.exports = router;
