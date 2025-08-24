@@ -1,0 +1,329 @@
+const mongoose = require('mongoose');
+
+const bookingSchema = new mongoose.Schema({
+  bookingNumber: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: [true, 'User is required']
+  },
+  route: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Route',
+    required: [true, 'Route is required']
+  },
+  bus: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Bus',
+    required: [true, 'Bus is required']
+  },
+  trip: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Trip',
+    required: [true, 'Trip is required']
+  },
+  passengers: [{
+    firstName: {
+      type: String,
+      required: [true, 'Passenger first name is required']
+    },
+    lastName: {
+      type: String,
+      required: [true, 'Passenger last name is required']
+    },
+    age: {
+      type: Number,
+      required: [true, 'Passenger age is required'],
+      min: [0, 'Age cannot be negative']
+    },
+    gender: {
+      type: String,
+      enum: ['male', 'female', 'other', 'prefer-not-to-say'],
+      default: 'prefer-not-to-say'
+    },
+    seatNumber: {
+      type: String,
+      required: [true, 'Seat number is required']
+    },
+    seatType: {
+      type: String,
+      enum: ['window', 'aisle', 'front', 'back'],
+      default: 'aisle'
+    },
+    isChild: {
+      type: Boolean,
+      default: false
+    },
+    isSenior: {
+      type: Boolean,
+      default: false
+    },
+    specialRequirements: [String],
+    documentNumber: String, // ID proof number
+    documentType: {
+      type: String,
+      enum: ['passport', 'driving-license', 'national-id', 'other']
+    }
+  }],
+  journeyDetails: {
+    departureDate: {
+      type: Date,
+      required: [true, 'Departure date is required']
+    },
+    departureTime: {
+      type: String,
+      required: [true, 'Departure time is required']
+    },
+    arrivalDate: {
+      type: Date,
+      required: [true, 'Arrival date is required']
+    },
+    arrivalTime: {
+      type: String,
+      required: [true, 'Arrival time is required']
+    },
+    pickupPoint: {
+      city: String,
+      terminal: String,
+      address: String,
+      coordinates: {
+        latitude: Number,
+        longitude: Number
+      }
+    },
+    dropPoint: {
+      city: String,
+      terminal: String,
+      address: String,
+      coordinates: {
+        latitude: Number,
+        longitude: Number
+      }
+    }
+  },
+  pricing: {
+    baseFare: {
+      type: Number,
+      required: [true, 'Base fare is required']
+    },
+    taxes: {
+      type: Number,
+      default: 0
+    },
+    discounts: {
+      type: Number,
+      default: 0
+    },
+    totalAmount: {
+      type: Number,
+      required: [true, 'Total amount is required']
+    },
+    currency: {
+      type: String,
+      default: 'USD'
+    },
+    appliedDiscounts: [{
+      type: String,
+      description: String,
+      amount: Number
+    }]
+  },
+  payment: {
+    status: {
+      type: String,
+      enum: ['pending', 'completed', 'failed', 'refunded', 'cancelled'],
+      default: 'pending'
+    },
+    method: {
+      type: String,
+      enum: ['credit-card', 'debit-card', 'net-banking', 'upi', 'wallet', 'cash'],
+      default: 'credit-card'
+    },
+    transactionId: String,
+    paymentDate: Date,
+    refundAmount: Number,
+    refundDate: Date
+  },
+  status: {
+    type: String,
+    enum: ['confirmed', 'pending', 'cancelled', 'completed', 'no-show'],
+    default: 'pending'
+  },
+  cancellation: {
+    isCancelled: {
+      type: Boolean,
+      default: false
+    },
+    cancelledBy: {
+      type: String,
+      enum: ['user', 'admin', 'system'],
+      default: 'user'
+    },
+    cancellationReason: String,
+    cancellationDate: Date,
+    refundAmount: Number,
+    cancellationFee: Number
+  },
+  notifications: {
+    emailSent: { type: Boolean, default: false },
+    smsSent: { type: Boolean, default: false },
+    pushSent: { type: Boolean, default: false },
+    reminderSent: { type: Boolean, default: false }
+  },
+  specialRequests: [String],
+  notes: String,
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for passenger count
+bookingSchema.virtual('passengerCount').get(function() {
+  return this.passengers.length;
+});
+
+// Virtual for isUpcoming
+bookingSchema.virtual('isUpcoming').get(function() {
+  const now = new Date();
+  const departureDateTime = new Date(this.journeyDetails.departureDate);
+  departureDateTime.setHours(parseInt(this.journeyDetails.departureTime.split(':')[0]));
+  departureDateTime.setMinutes(parseInt(this.journeyDetails.departureTime.split(':')[1]));
+  return departureDateTime > now && this.status === 'confirmed';
+});
+
+// Virtual for isCompleted
+bookingSchema.virtual('isCompleted').get(function() {
+  const now = new Date();
+  const arrivalDateTime = new Date(this.journeyDetails.arrivalDate);
+  arrivalDateTime.setHours(parseInt(this.journeyDetails.arrivalTime.split(':')[0]));
+  arrivalDateTime.setMinutes(parseInt(this.journeyDetails.arrivalTime.split(':')[1]));
+  return arrivalDateTime < now && this.status === 'confirmed';
+});
+
+// Virtual for canCancel
+bookingSchema.virtual('canCancel').get(function() {
+  if (this.status !== 'confirmed' || this.cancellation.isCancelled) return false;
+  
+  const now = new Date();
+  const departureDateTime = new Date(this.journeyDetails.departureDate);
+  departureDateTime.setHours(parseInt(this.journeyDetails.departureTime.split(':')[0]));
+  departureDateTime.setMinutes(parseInt(this.journeyDetails.departureTime.split(':')[1]));
+  
+  // Can cancel up to 2 hours before departure
+  const twoHoursBefore = new Date(departureDateTime.getTime() - (2 * 60 * 60 * 1000));
+  return now < twoHoursBefore;
+});
+
+// Index for better query performance
+bookingSchema.index({ bookingNumber: 1 });
+bookingSchema.index({ user: 1 });
+bookingSchema.index({ route: 1 });
+bookingSchema.index({ bus: 1 });
+bookingSchema.index({ trip: 1 });
+bookingSchema.index({ status: 1 });
+bookingSchema.index({ 'journeyDetails.departureDate': 1 });
+bookingSchema.index({ 'payment.status': 1 });
+bookingSchema.index({ isActive: 1 });
+
+// Pre-save middleware to generate booking number
+bookingSchema.pre('save', function(next) {
+  if (this.isNew && !this.bookingNumber) {
+    const timestamp = Date.now().toString();
+    const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+    this.bookingNumber = `BK${timestamp.slice(-6)}${random}`;
+  }
+  next();
+});
+
+// Method to calculate total amount
+bookingSchema.methods.calculateTotal = function() {
+  let total = this.pricing.baseFare;
+  total += this.pricing.taxes;
+  total -= this.pricing.discounts;
+  return Math.max(0, total);
+};
+
+// Method to cancel booking
+bookingSchema.methods.cancelBooking = function(reason, cancelledBy = 'user') {
+  if (!this.canCancel) {
+    throw new Error('Booking cannot be cancelled');
+  }
+  
+  this.cancellation = {
+    isCancelled: true,
+    cancelledBy,
+    cancellationReason: reason,
+    cancellationDate: new Date(),
+    cancellationFee: this.calculateCancellationFee()
+  };
+  
+  this.status = 'cancelled';
+  this.payment.status = 'refunded';
+  
+  // Calculate refund amount
+  const refundAmount = this.pricing.totalAmount - this.cancellation.cancellationFee;
+  this.cancellation.refundAmount = Math.max(0, refundAmount);
+  this.payment.refundAmount = this.cancellation.refundAmount;
+  this.payment.refundDate = new Date();
+  
+  return this.save();
+};
+
+// Method to calculate cancellation fee
+bookingSchema.methods.calculateCancellationFee = function() {
+  const now = new Date();
+  const departureDateTime = new Date(this.journeyDetails.departureDate);
+  departureDateTime.setHours(parseInt(this.journeyDetails.departureTime.split(':')[0]));
+  departureDateTime.setMinutes(parseInt(this.journeyDetails.departureTime.split(':')[1]));
+  
+  const timeUntilDeparture = departureDateTime.getTime() - now.getTime();
+  const hoursUntilDeparture = timeUntilDeparture / (1000 * 60 * 60);
+  
+  if (hoursUntilDeparture > 24) {
+    return this.pricing.totalAmount * 0.1; // 10% fee
+  } else if (hoursUntilDeparture > 2) {
+    return this.pricing.totalAmount * 0.25; // 25% fee
+  } else {
+    return this.pricing.totalAmount * 0.5; // 50% fee
+  }
+};
+
+// Method to mark as completed
+bookingSchema.methods.markAsCompleted = function() {
+  if (this.status === 'confirmed' && this.isCompleted) {
+    this.status = 'completed';
+    return this.save();
+  }
+  throw new Error('Booking cannot be marked as completed');
+};
+
+// Static method to find upcoming bookings
+bookingSchema.statics.findUpcoming = function() {
+  const now = new Date();
+  return this.find({
+    'journeyDetails.departureDate': { $gt: now },
+    status: 'confirmed',
+    isActive: true
+  });
+};
+
+// Static method to find bookings by user
+bookingSchema.statics.findByUser = function(userId) {
+  return this.find({ user: userId, isActive: true }).sort({ createdAt: -1 });
+};
+
+// Static method to find bookings by status
+bookingSchema.statics.findByStatus = function(status) {
+  return this.find({ status, isActive: true });
+};
+
+module.exports = mongoose.model('Booking', bookingSchema);
